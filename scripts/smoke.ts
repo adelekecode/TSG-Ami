@@ -86,7 +86,25 @@ await client.connect(
     requestInit: { headers: { Authorization: "Bearer " + key } },
   }),
 );
-assert.equal((await client.listTools()).tools.length, 7);
+const tools = (await client.listTools()).tools.map((tool) => tool.name);
+for (const name of [
+  "resolve_resident",
+  "get_resident_context",
+  "create_maintenance_ticket",
+  "get_maintenance_status",
+  "create_complaint",
+  "get_rent_summary",
+  "get_resident_requests",
+  "lookup_unit",
+  "get_maintenance_ticket",
+  "verify_resident",
+  "get_my_profile",
+  "get_my_invoices",
+  "create_payment_link",
+  "check_payment_status",
+])
+  assert(tools.includes(name), `Missing MCP tool: ${name}`);
+assert.equal(tools.length, 14);
 const context = await client.callTool({
   name: "get_resident_context",
   arguments: auth,

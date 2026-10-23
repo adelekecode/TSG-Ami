@@ -1,5 +1,5 @@
 import { z } from "zod";
-export type Env = { DB: D1Database; API_KEY: string };
+export type Env = { DB: D1Database; API_KEY?: string; DEMO_API_TOKEN?: string; PAYSTACK_SECRET_KEY?: string };
 export class DomainError extends Error {
   constructor(
     message: string,
@@ -38,7 +38,7 @@ export async function hash(value: string) {
     (x) => x.toString(16).padStart(2, "0"),
   ).join("");
 }
-async function tenancy(env: Env, token: string) {
+export async function tenancy(env: Env, token: string) {
   const row = await env.DB.prepare(
     "SELECT t.id, t.unit_id, r.preferred_name FROM sessions s JOIN tenancies t ON t.id=s.tenancy_id JOIN residents r ON r.id=t.resident_id WHERE s.token_hash=? AND s.expires_at>? AND t.active=1",
   )
