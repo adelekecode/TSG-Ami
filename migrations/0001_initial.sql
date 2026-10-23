@@ -1,0 +1,10 @@
+PRAGMA foreign_keys = ON;
+CREATE TABLE residents (id TEXT PRIMARY KEY, preferred_name TEXT NOT NULL);
+CREATE TABLE units (id TEXT PRIMARY KEY, property_name TEXT NOT NULL);
+CREATE TABLE tenancies (id TEXT PRIMARY KEY, resident_id TEXT NOT NULL REFERENCES residents(id), unit_id TEXT NOT NULL UNIQUE REFERENCES units(id), onboarding_hash TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE sessions (token_hash TEXT PRIMARY KEY, tenancy_id TEXT NOT NULL REFERENCES tenancies(id), expires_at INTEGER NOT NULL);
+CREATE TABLE verification_attempts (unit_id TEXT PRIMARY KEY, attempts INTEGER NOT NULL, reset_at INTEGER NOT NULL);
+CREATE TABLE requests (id TEXT PRIMARY KEY, tenancy_id TEXT NOT NULL REFERENCES tenancies(id), kind TEXT NOT NULL CHECK(kind IN ('maintenance','complaint')), description TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX requests_tenancy ON requests(tenancy_id,created_at);
+CREATE TABLE activity_events (id TEXT PRIMARY KEY, tenancy_id TEXT NOT NULL REFERENCES tenancies(id), request_id TEXT REFERENCES requests(id), event TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE rent_invoices (id TEXT PRIMARY KEY, tenancy_id TEXT NOT NULL REFERENCES tenancies(id), amount_minor INTEGER NOT NULL CHECK(amount_minor >= 0), paid_minor INTEGER NOT NULL DEFAULT 0 CHECK(paid_minor >= 0 AND paid_minor <= amount_minor), currency TEXT NOT NULL DEFAULT 'NGN', due_date TEXT NOT NULL);
