@@ -15,7 +15,7 @@ npm run db:seed
 npm run dev
 ```
 
-The initial setup already created `.dev.vars` with a random local key and initialized local D1. Keep that file private. Wrangler serves http://127.0.0.1:8787; local data survives restarts in `.wrangler/state`. `/health` is public; other endpoints require `Authorization: Bearer <API_KEY>`. Do not put the service key in a public frontend.
+The initial setup created `.dev.vars` with a random local service key. Keep that file private. Wrangler serves http://127.0.0.1:8787. The D1 binding is configured with `remote: true`, so local Worker code connects to Cloudflare D1; local D1 commands still use Wrangler's local database. `/health` is public; other endpoints require `Authorization: Bearer <API_KEY>`. Do not put the service key in a public frontend.
 
 ```sh
 npm run typecheck
@@ -56,7 +56,7 @@ All use POST and JSON bodies with the shared service Authorization header.
 | `/v1/rent/summary` | `resident_token` | Invoices, balances and due dates |
 | `/v1/requests` | `resident_token` | Latest 100 requests |
 
-The seed includes 10 fictional residents across two properties, duplicate first names, 12 invoices with paid, partial, and unpaid examples, and maintenance and complaint requests across open, in-progress, and resolved statuses. `npm run db:seed` is safe to rerun and adds missing fixtures without overwriting existing records.
+The seed includes 10 fictional residents across two properties, duplicate first names, 12 invoices with paid, partial, and unpaid examples, and maintenance and complaint requests across open, in-progress, and resolved statuses. `npm run db:seed` loads these fixtures into local D1. To load them into Cloudflare D1, run `npx wrangler d1 execute ami-db --remote --file seed.sql`. The seed is safe to rerun and adds missing fixtures without overwriting existing records.
 
 Amounts are integers in minor currency units: 150000000 kobo = NGN 1,500,000. Writes to requests and their activity history are atomic D1 batches. Descriptions must contain 5–4000 characters. Creation calls are not idempotent: check the request list after an uncertain response before retrying.
 

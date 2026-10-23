@@ -1,14 +1,15 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "ami-worker",
-  "main": "src/index.ts",
-  "compatibility_date": "2026-10-21",
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "ami-db",
-      "database_id": "00000000-0000-0000-0000-000000000000",
-      "migrations_dir": "migrations",
-    },
-  ],
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "ami-worker",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-10-21",
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "ami-db",
+			"database_id": "f38e2b56-7dea-41ab-b442-d4e2f83193fd",
+			"migrations_dir": "migrations",
+			"remote": true,
+		},
+	]
 }
