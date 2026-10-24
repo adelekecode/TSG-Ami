@@ -107,9 +107,10 @@ for (const name of [
   "create_demo_resident",
   "start_resident_registration",
   "get_onboarding_status",
+  "check_latest_payment",
 ])
   assert(tools.includes(name), `Missing MCP tool: ${name}`);
-assert.equal(tools.length, 19);
+assert.equal(tools.length, 20);
 const context = await client.callTool({
   name: "get_resident_context",
   arguments: auth,

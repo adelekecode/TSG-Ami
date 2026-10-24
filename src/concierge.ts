@@ -1,3 +1,4 @@
+import { rememberPaymentForSession } from "./payment-session-store";
 import { z } from "zod";
 import { ApiError, lookupUnit } from "./maintenance";
 import { execute, tenancy, DomainError } from "./domain";
@@ -180,7 +181,7 @@ export function paymentLinkResult(
       checkoutUrl,
       "",
       `Payment reference: ${reference}`,
-      "🧪 TEST MODE — no real money will be collected.",
+      "TEST MODE — no real money will be collected.",
       'Open the link to try the checkout. When you are done, come back and say "Check my payment" so I can verify its status.',
     ].join("\n"),
     message: "Link generated, payment NOT confirmed.",
@@ -244,14 +245,24 @@ export async function startPayment(
     };
   if (i.currency !== "NGN")
     throw new ApiError(409, "UNSUPPORTED_CURRENCY", "Test checkout currently supports NGN invoices only.");
+  const rememberCheckout = async (token:string, owner:string, invoiceId:string, ref:string) => {
+    try { await rememberPaymentForSession(env.DB,token,owner,invoiceId,ref); }
+    catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(503,"PAYMENT_CONTEXT_UNAVAILABLE","The checkout was initialized, but its session context could not be saved. Retry to reuse the existing link.");
+    }
+  };
   const active = await env.DB.prepare(
     `SELECT * FROM payment_attempts WHERE invoice_id=? AND status IN ('initializing','pending') ORDER BY created_at DESC LIMIT 1`,
   )
     .bind(i.id)
     .first<PaymentRow>();
   if (active) {
-    if (active.status === "pending" && active.checkout_url)
-      return paymentLinkResult(i, active.reference, active.checkout_url, true);
+    if (active.status === "pending" && active.checkout_url) {
+      const result = paymentLinkResult(i, active.reference, active.checkout_url, true);
+      await rememberCheckout(session_token, r.id, i.id, active.reference);
+      return result;
+    }
     throw new ApiError(
       409,
       "PAYMENT_INITIALIZING",
@@ -274,6 +285,7 @@ export async function startPayment(
       "PAYMENT_IN_PROGRESS",
       "An invoice payment is already in progress.",
     );
+  let chatResult: ReturnType<typeof paymentLinkResult>;
   try {
     const safeOrigin = new URL(origin).origin;
     const result = await paystackCall(env, "/transaction/initialize", {
@@ -301,17 +313,11 @@ export async function startPayment(
         "Unexpected response from Paystack.",
       );
     // Validate the returned URL before storing it or showing it to the resident.
-    const chatResult = paymentLinkResult(
+    chatResult = paymentLinkResult(
       i,
       reference,
       result.authorization_url,
     );
-    await env.DB.prepare(
-      `UPDATE payment_attempts SET status='pending', checkout_url=?, updated_at=? WHERE reference=? AND status='initializing'`,
-    )
-      .bind(chatResult.checkout_url, now(), reference)
-      .run();
-    return chatResult;
   } catch (e) {
     await env.DB.prepare(
       `UPDATE payment_attempts SET status='error',updated_at=? WHERE reference=? AND status='initializing'`,
@@ -321,6 +327,14 @@ export async function startPayment(
       .catch(() => {});
     throw e;
   }
+  // These writes occur AFTER provider initialization. Their failure must not label
+  // an already-created provider transaction as an initialization error.
+  await env.DB.prepare(
+    `UPDATE payment_attempts SET status='pending', checkout_url=?, updated_at=? WHERE reference=? AND status='initializing'`,
+  ).bind(chatResult.checkout_url, now(), reference).run();
+  await rememberCheckout(session_token,r.id,i.id,reference);
+  return chatResult;
+
 }
 
 async function verifyAttempt(env: PaystackEnv, attempt: PaymentRow) {
@@ -405,6 +419,22 @@ export async function getPaymentStatus(
       verified_paid: true,
     };
   return verifyAttempt(env, attempt);
+}
+export async function getPaymentStatusByReference(env:PaystackEnv,sessionToken:string,reference:string) {
+  const resident=await verifiedResident(env.DB,sessionToken);
+  if(typeof reference!=="string" || reference.length<8 || reference.length>128)
+    throw new ApiError(400,"INVALID_REFERENCE","The payment reference is invalid.");
+  const attempt=await env.DB.prepare("SELECT * FROM payment_attempts WHERE reference=? AND resident_id=? LIMIT 1")
+    .bind(reference,resident.id).first<PaymentRow>();
+  if(!attempt) throw new ApiError(404,"PAYMENT_NOT_FOUND","No payment found for this resident.");
+  const invoice=await ownedInvoice(env.DB,resident.id,attempt.invoice_id);
+  if(attempt.status==="initializing" || attempt.status==="error")
+    return {invoice:formatInvoice(invoice),reference,payment_status:attempt.status,verified_paid:false,
+      message:attempt.status==="initializing"?"A checkout link is still being prepared.":"The checkout could not be initialized."};
+  if(attempt.status==="success" && invoice.paid_reference===reference)
+    return {invoice:formatInvoice(invoice),reference,payment_status:"success",verified_paid:true};
+  // Verify this exact row/reference. Never substitute the invoice's latest attempt.
+  return verifyAttempt(env,attempt);
 }
 export async function applySuccessfulWebhook(
   env: PaystackEnv,

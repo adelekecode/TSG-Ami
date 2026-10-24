@@ -1,3 +1,4 @@
+import { checkLatestPayment } from "./payment-continuity";
 import { findDemoProfiles, openDemoProfile, createDemoResident, startResidentRegistration, getOnboardingStatus } from "./onboarding";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -102,6 +103,10 @@ app.get("/v1/onboarding/status", async (c) => {
 app.get("/v1/me", async (c) => c.json(await myProfile(c.env.DB, residentSession(c))));
 app.get("/v1/invoices", async (c) => c.json(await myInvoices(c.env.DB, residentSession(c))));
 app.post("/v1/payments/initialize", async (c) => c.json(await startPayment(c.env, await c.req.json(), new URL(c.req.url).origin)));
+app.get("/v1/payments/latest", async (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json(await checkLatestPayment(c.env,{session_token:residentSession(c)}));
+});
 app.get("/v1/payments/:invoiceId", async (c) => c.json(await getPaymentStatus(c.env, residentSession(c), c.req.param("invoiceId"))));
 app.get("/v1/units/:id", async (c) => c.json({ unit: await lookupUnit(c.env.DB, c.req.param("id")) }));
 app.post("/v1/tickets", async (c) => {
@@ -115,7 +120,7 @@ app.patch("/v1/tickets/:id/status", async (c) => c.json({ ticket: await updateTi
 app.all("/mcp", async (c) => {
   const server = new McpServer({
     name: "ami-tenant-concierge",
-    version: "0.4.0",
+    version: "0.5.0",
   });
   for (const name of Object.keys(schemas) as ToolName[]) {
     if (name === "create_maintenance_ticket" || name === "create_complaint") continue;

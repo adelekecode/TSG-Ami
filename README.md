@@ -246,3 +246,30 @@ Run `npm run lint`, `npm run typecheck`, `npm test`, and `npm run build` before
 v6 visitor creation. Detailed observed outcomes and exact commands are recorded in
 [ONBOARDING_V6.md](ONBOARDING_V6.md). The user is handling Chord; simulator checks
 and publication must not be inferred from successful backend tests.
+
+
+## Payment continuity v7
+
+`check_latest_payment({session_token})` verifies the exact payment associated with
+an active resident session, or falls back to the latest recorded attempt owned by
+that same tenancy in a new verified session. It needs no invoice ID. The existing
+`check_payment_status` and all 19 older MCP definitions remain available unchanged;
+the deployed server exposes 20 tools.
+
+Migration `0005_payment_session_context.sql` adds only a hashed-session/tenancy/
+invoice/reference association. Expired session deletion cascades safely. Real
+new and reused pending Paystack links are remembered only after their provider URL
+has been saved; a context-save failure surfaces a specific recoverable error while
+leaving that checkout pending and reusable. Payment success still requires the
+existing server-side test-domain/reference/amount/currency verification.
+
+`GET /v1/payments/latest` is integration-authenticated and requires the private
+`X-Demo-Session` header. It is registered before the invoice-ID route. Tool audit
+logs contain controlled names/outcomes/error codes, not tokens or credentials.
+The payment chat message is plain text and keeps the exact returned provider URL.
+
+See [v7 diagnosis, exact commands and observed evidence](PAYMENT_CONTINUITY_V7.md)
+and [manual simulator acceptance](tests/SIMULATOR_ACCEPTANCE.md). Chord publication,
+activation and conversation sign-off are user-handled and not implied by backend
+checks. `scripts/tail-payment-audit.ts` filters raw Cloudflare tail envelopes before
+saving logs, and `scripts/backup-payment-db.ts` redacts temporary export URLs.
