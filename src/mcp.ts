@@ -1,5 +1,16 @@
-import { checkLatestPayment, checkLatestPaymentSchema } from "./payment-continuity";
-import { createDemoResident, startResidentRegistration, getOnboardingStatus, createDemoResidentSchema, startRegistrationSchema, registrationStatusSchema } from "./onboarding";
+import {
+  checkLatestPayment,
+  checkLatestPaymentSchema,
+} from "./payment-continuity";
+import { getComplaintStatus, complaintStatusSchema } from "./complaint-status";
+import {
+  createDemoResident,
+  startResidentRegistration,
+  getOnboardingStatus,
+  createDemoResidentSchema,
+  startRegistrationSchema,
+  registrationStatusSchema,
+} from "./onboarding";
 import {
   findDemoProfiles,
   openDemoProfile,
@@ -41,31 +52,93 @@ const fail = (err: unknown) => ({
             ? err.code
             : err instanceof DomainError
               ? "RESIDENT_ERROR"
-              : "TOOL_ERROR",
+              : err instanceof z.ZodError
+                ? "INVALID_INPUT"
+                : "TOOL_ERROR",
         message:
           err instanceof ApiError || err instanceof DomainError
             ? err.message
-            : "The system could not complete the request.",
+            : err instanceof z.ZodError
+              ? "Provide valid inputs for this request."
+              : "The system could not complete the request.",
       }),
     },
   ],
 });
 // Only controlled metadata is logged: never arguments, capabilities, URLs, or secrets.
-const safePaymentStatuses = new Set(["success","pending","ongoing","processing","abandoned","failed","reversed","not_started","initializing","error"]);
-async function auditedTool(name:string, task:()=>Promise<unknown>) {
-  const invocation_id=crypto.randomUUID();
-  console.info(JSON.stringify({event:"mcp_tool_invoked",tool:name,invocation_id}));
+const safePaymentStatuses = new Set([
+  "success",
+  "pending",
+  "ongoing",
+  "processing",
+  "abandoned",
+  "failed",
+  "reversed",
+  "not_started",
+  "initializing",
+  "error",
+]);
+async function auditedTool(name: string, task: () => Promise<unknown>) {
+  const invocation_id = crypto.randomUUID();
+  console.info(
+    JSON.stringify({ event: "mcp_tool_invoked", tool: name, invocation_id }),
+  );
   try {
-    const result=await task();
-    const row=result as {found?:unknown;payment_status?:unknown}|null;
-    const metadata:Record<string,unknown>={event:"mcp_tool_completed",tool:name,invocation_id,outcome:"success"};
-    if(typeof row?.found==="boolean") metadata.found=row.found;
-    if(typeof row?.payment_status==="string" && safePaymentStatuses.has(row.payment_status)) metadata.status=row.payment_status;
+    const result = await task();
+    const row = result as {
+      found?: unknown;
+      payment_status?: unknown;
+      complaint_id?: unknown;
+      id?: unknown;
+      created?: unknown;
+      status?: unknown;
+    } | null;
+    const metadata: Record<string, unknown> = {
+      event: "mcp_tool_completed",
+      tool: name,
+      invocation_id,
+      outcome: "success",
+    };
+    if (typeof row?.found === "boolean") metadata.found = row.found;
+    if (
+      typeof row?.payment_status === "string" &&
+      safePaymentStatuses.has(row.payment_status)
+    )
+      metadata.status = row.payment_status;
+    if (name === "create_complaint" || name === "get_complaint_status") {
+      const reference = row?.complaint_id ?? row?.id;
+      if (
+        typeof reference === "string" &&
+        /^CMP-[a-f0-9-]{36}$/.test(reference)
+      )
+        metadata.complaint_id = reference;
+      if (typeof row?.created === "boolean") metadata.created = row.created;
+      if (
+        typeof row?.status === "string" &&
+        ["open", "in_review", "resolved"].includes(row.status)
+      )
+        metadata.status = row.status;
+    }
     console.info(JSON.stringify(metadata));
     return ok(result);
-  } catch(error) {
-    const code=error instanceof ApiError?error.code:error instanceof DomainError?"RESIDENT_ERROR":error instanceof z.ZodError?"INVALID_INPUT":"TOOL_ERROR";
-    console.error(JSON.stringify({event:"mcp_tool_failed",tool:name,invocation_id,outcome:"error",code}));
+  } catch (error) {
+    const code =
+      error instanceof ApiError
+        ? error.code
+        : error instanceof DomainError
+          ? "RESIDENT_ERROR"
+          : error instanceof z.ZodError
+            ? "INVALID_INPUT"
+            : "TOOL_ERROR";
+    console.error(
+      JSON.stringify({
+        event: "mcp_tool_failed",
+        tool: name,
+        invocation_id,
+        outcome: "error",
+        code,
+      }),
+    );
     return fail(error);
   }
 }
@@ -169,7 +242,8 @@ export function registerConciergeTools(
         "Get property/tenancy context ONLY using the validated demo session token from verify_resident.",
       inputSchema: { session_token: z.string().min(20) },
     },
-    async ({ session_token }) => auditedTool("get_my_profile", () => myProfile(env.DB, session_token)),
+    async ({ session_token }) =>
+      auditedTool("get_my_profile", () => myProfile(env.DB, session_token)),
   );
   server.registerTool(
     "get_my_invoices",
@@ -178,7 +252,8 @@ export function registerConciergeTools(
         "Read rent and utility amounts for the verified resident only, scoped by session token. Amounts come from D1.",
       inputSchema: { session_token: z.string().min(20) },
     },
-    async ({ session_token }) => auditedTool("get_my_invoices", () => myInvoices(env.DB, session_token)),
+    async ({ session_token }) =>
+      auditedTool("get_my_invoices", () => myInvoices(env.DB, session_token)),
   );
   server.registerTool(
     "create_payment_link",
@@ -191,7 +266,10 @@ export function registerConciergeTools(
         confirmed: z.literal(true),
       },
     },
-    async (params) => auditedTool("create_payment_link", () => startPayment(env, params, origin)),
+    async (params) =>
+      auditedTool("create_payment_link", () =>
+        startPayment(env, params, origin),
+      ),
   );
   server.registerTool(
     "check_payment_status",
@@ -226,17 +304,12 @@ export function registerConciergeTools(
         idempotency_key: z.string().min(8).optional(),
       },
     },
-    async (params) => {
-      try {
-        return ok(
-          params.session_token
-            ? await createComplaint(env.DB, complaintSchema.parse(params))
-            : await execute(env, "create_complaint", params),
-        );
-      } catch (e) {
-        return fail(e);
-      }
-    },
+    async (params) =>
+      auditedTool("create_complaint", () =>
+        params.session_token
+          ? createComplaint(env.DB, complaintSchema.parse(params))
+          : execute(env, "create_complaint", params),
+      ),
   );
   server.registerTool(
     "find_demo_profiles",
@@ -245,7 +318,8 @@ export function registerConciergeTools(
         "Discover at most five fictional sample profiles using a display name only as a search hint. Returns safe matches or sample options, never private account data. Ask the tester to choose and confirm a sample before opening it. Requires demo mode and a Paystack test key.",
       inputSchema: findDemoProfilesSchema.shape,
     },
-    async (params) => auditedTool("find_demo_profiles", () => findDemoProfiles(env, params)),
+    async (params) =>
+      auditedTool("find_demo_profiles", () => findDemoProfiles(env, params)),
   );
   server.registerTool(
     "open_demo_profile",
@@ -254,23 +328,77 @@ export function registerConciergeTools(
         "Open a chosen fictional profile ONLY after the tester explicitly confirms it. This is sample selection, not identity verification. Returns a private session_token valid for 30 minutes: NEVER print or log it or store it in conversational memory. Pass it internally to get_my_profile, get_my_invoices and other resident tools in this chat.",
       inputSchema: openDemoProfileSchema.shape,
     },
-    async (params) => auditedTool("open_demo_profile", () => openDemoProfile(env, params)),
+    async (params) =>
+      auditedTool("open_demo_profile", () => openDemoProfile(env, params)),
   );
-  server.registerTool("create_demo_resident", {
-    description: "Demo/test only: after explicit permission, atomically persist a fictional resident, apartment, tenancy, rent invoice and electricity invoice. Reuse request_key on retries. The returned 30-minute session_token is private; never show it in chat or store it in memory. This does not establish real residency.",
-    inputSchema: createDemoResidentSchema.shape,
-  }, async (params) => { try { return ok(await createDemoResident(env,params)); } catch(e) { return fail(e); } });
-  server.registerTool("start_resident_registration", {
-    description: "Record an unverified pending registration with explicit consent and a request_key reused on retries. Grants NO resident/invoice access and sends NO manager notification. Keep the returned registration_token private.",
-    inputSchema: startRegistrationSchema.shape,
-  }, async (params) => { try { return ok(await startResidentRegistration(env,params)); } catch(e) { return fail(e); } });
-  server.registerTool("get_onboarding_status", {
-    description: "Check registration status using its private registration_token. A reference alone grants no lookup or tenancy access. Never print the token in chat.",
-    inputSchema: registrationStatusSchema.shape,
-  }, async ({registration_token}) => { try { return ok(await getOnboardingStatus(env,registration_token)); } catch(e) { return fail(e); } });
-  server.registerTool("check_latest_payment", {
-    description: "For an already-open resident account, locate its most recent Paystack TEST payment in D1 and verify that exact reference. Call for 'check my payment' without an invoice ID. Uses active-session context first, then history of the same resident only. Only say paid when verified_paid is true. Keep session_token private.",
-    inputSchema: checkLatestPaymentSchema.shape,
-  }, async (params) => auditedTool("check_latest_payment", () => checkLatestPayment(env,params)));
+  server.registerTool(
+    "create_demo_resident",
+    {
+      description:
+        "Demo/test only: after explicit permission, atomically persist a fictional resident, apartment, tenancy, rent invoice and electricity invoice. Reuse request_key on retries. The returned 30-minute session_token is private; never show it in chat or store it in memory. This does not establish real residency.",
+      inputSchema: createDemoResidentSchema.shape,
+    },
+    async (params) => {
+      try {
+        return ok(await createDemoResident(env, params));
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
+  server.registerTool(
+    "start_resident_registration",
+    {
+      description:
+        "Record an unverified pending registration with explicit consent and a request_key reused on retries. Grants NO resident/invoice access and sends NO manager notification. Keep the returned registration_token private.",
+      inputSchema: startRegistrationSchema.shape,
+    },
+    async (params) => {
+      try {
+        return ok(await startResidentRegistration(env, params));
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
+  server.registerTool(
+    "get_onboarding_status",
+    {
+      description:
+        "Check registration status using its private registration_token. A reference alone grants no lookup or tenancy access. Never print the token in chat.",
+      inputSchema: registrationStatusSchema.shape,
+    },
+    async ({ registration_token }) => {
+      try {
+        return ok(await getOnboardingStatus(env, registration_token));
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
+  server.registerTool(
+    "check_latest_payment",
+    {
+      description:
+        "For an already-open resident account, locate its most recent Paystack TEST payment in D1 and verify that exact reference. Call for 'check my payment' without an invoice ID. Uses active-session context first, then history of the same resident only. Only say paid when verified_paid is true. Keep session_token private.",
+      inputSchema: checkLatestPaymentSchema.shape,
+    },
+    async (params) =>
+      auditedTool("check_latest_payment", () =>
+        checkLatestPayment(env, params),
+      ),
+  );
+  server.registerTool(
+    "get_complaint_status",
+    {
+      description:
+        "Read an existing complaint using a valid private resident session and exactly one complaint_id or request_key (the original idempotency_key). Returns found only for that resident's records, including legacy references. Never creates a case or recovers identity from a name/reference. A missing match does not prove an earlier tool never ran.",
+      inputSchema: complaintStatusSchema.shape,
+    },
+    async (params) =>
+      auditedTool("get_complaint_status", () =>
+        getComplaintStatus(env.DB, params),
+      ),
+  );
   return server;
 }

@@ -6,3 +6,4 @@ dist/
 .env
 .DS_Store
 PAYMENT_CONTINUITY_V7.md
+/field-notes

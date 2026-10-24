@@ -31,6 +31,7 @@ export const schemas = {
   create_complaint: z.object({
     resident_token: z.string().min(1),
     description: z.string().trim().min(5).max(4000),
+    idempotency_key: z.string().min(8).max(128).optional(),
   }),
   get_rent_summary: z.object({ resident_token: z.string().min(1) }),
   get_resident_requests: z.object({ resident_token: z.string().min(1) }),
@@ -94,6 +95,53 @@ export async function execute(
     return { verified: true, resident_token: token, expires_in: 86400 };
   }
   const t = await tenancy(env, a.resident_token);
+  // The legacy MCP definition already accepts this key. Previously it was
+  // stripped by this schema, so retries created a fresh row despite supplying it.
+  if (name === "create_complaint" && a.idempotency_key) {
+    const id = `CMP-${crypto.randomUUID()}`;
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO complaints
+      (id,resident_id,unit_id,category,description,status,idempotency_key,created_at)
+      VALUES (?,?,?,'other',?,'open',?,?)`,
+    )
+      .bind(
+        id,
+        t.id,
+        t.unit_id,
+        a.description,
+        a.idempotency_key,
+        new Date().toISOString(),
+      )
+      .run();
+    const saved = await env.DB.prepare(
+      "SELECT id,resident_id,description,category,status FROM complaints WHERE idempotency_key=?",
+    )
+      .bind(a.idempotency_key)
+      .first<{
+        id: string;
+        resident_id: string;
+        description: string;
+        category: string;
+        status: string;
+      }>();
+    if (
+      !saved ||
+      saved.resident_id !== t.id ||
+      saved.description !== a.description ||
+      saved.category !== "other"
+    )
+      throw new DomainError(
+        "This complaint request key was already used.",
+        409,
+      );
+    return {
+      id: saved.id,
+      kind: "complaint",
+      status: saved.status,
+      description: saved.description,
+      created: saved.id === id,
+    };
+  }
   if (name === "get_resident_context")
     return { preferred_name: t.preferred_name, unit_id: t.unit_id, demo: true };
   if (name === "get_rent_summary") {

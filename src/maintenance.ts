@@ -102,7 +102,8 @@ export async function lookupUnit(db: D1Database, rawId: string) {
 }
 
 export async function getTicket(db: D1Database, id: string, token?: string) {
-  const owner = token === undefined ? undefined : await tenancy({ DB: db }, token);
+  const owner =
+    token === undefined ? undefined : await tenancy({ DB: db }, token);
   const ticket = await db
     .prepare("SELECT * FROM maintenance_tickets WHERE id = ?")
     .bind(id)
@@ -120,7 +121,11 @@ export async function createTicket(db: D1Database, input: CreateTicketInput) {
   const data = createTicketSchema.parse(input);
   const owner = await tenancy({ DB: db }, data.session_token);
   if (owner.unit_id !== data.unit_id.trim().toUpperCase())
-    throw new ApiError(404, "UNIT_NOT_FOUND", "No unit found for this verified resident.");
+    throw new ApiError(
+      404,
+      "UNIT_NOT_FOUND",
+      "No unit found for this verified resident.",
+    );
   const unit = await lookupUnit(db, data.unit_id);
   // The backend enforces emergency classification for specified serious hazards.
   const priority = ["fire", "gas", "electrical", "severe_flooding"].includes(
@@ -135,7 +140,9 @@ export async function createTicket(db: D1Database, input: CreateTicketInput) {
   if (existing) {
     if (
       existing.tenancy_id !== owner.id ||
-      existing.category !== data.category || existing.priority !== priority || existing.hazard !== data.hazard ||
+      existing.category !== data.category ||
+      existing.priority !== priority ||
+      existing.hazard !== data.hazard ||
       existing.unit_id !== unit.id ||
       existing.description !== data.description ||
       existing.location !== data.location
@@ -201,7 +208,9 @@ export async function createTicket(db: D1Database, input: CreateTicketInput) {
     );
   if (
     saved.tenancy_id !== owner.id ||
-    saved.category !== data.category || saved.priority !== priority || saved.hazard !== data.hazard ||
+    saved.category !== data.category ||
+    saved.priority !== priority ||
+    saved.hazard !== data.hazard ||
     saved.unit_id !== unit.id ||
     saved.description !== data.description ||
     saved.location !== data.location

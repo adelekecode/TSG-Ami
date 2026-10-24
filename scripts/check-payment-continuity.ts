@@ -19,7 +19,7 @@ try {
   await client.connect(new StreamableHTTPClientTransport(new URL(base+"/mcp"),{requestInit:{headers:{Authorization:`Bearer ${key}`}}}));
   const current=(await client.listTools()).tools;
   const previous=JSON.parse(readFileSync(".wrangler/v7-baseline-tools.json","utf8")) as typeof current;
-  assert.equal(previous.length,19);assert.equal(current.length,20);
+  assert.equal(previous.length,19);assert.equal(current.length,21);
   for(const tool of previous)assert.deepEqual(current.find(t=>t.name===tool.name),tool,`Existing definition changed: ${tool.name}`);
   const options=await call("find_demo_profiles",{name:"Seun"});
   const chosen=options.profiles.find((p:any)=>p.demo_profile_id==="demo_seun_b101");assert(chosen);

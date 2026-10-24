@@ -273,3 +273,31 @@ and [manual simulator acceptance](tests/SIMULATOR_ACCEPTANCE.md). Chord publicat
 activation and conversation sign-off are user-handled and not implied by backend
 checks. `scripts/tail-payment-audit.ts` filters raw Cloudflare tail envelopes before
 saving logs, and `scripts/backup-payment-db.ts` redacts temporary export URLs.
+
+
+## Complaint reliability v8
+
+`skills/SKILL.md` is canonical; `chord/SKILL.md` is an identical publication mirror.
+The v8 revision uses one confirmation and a stable complaint key, treats lost
+execution evidence as uncertainty, and closes farewells without more tool calls.
+Publish/include one canonical revision in Chord and inspect the revision used on
+each tested reply; the local mirror does not verify that platform state.
+
+The deployed `get_complaint_status` accepts a valid private `session_token` and
+exactly one `complaint_id` or `request_key` (the original creation idempotency key).
+It reads only the authorized tenancy, including legacy references, and never
+creates a case. REST callers use integration authentication plus `X-Demo-Session`
+with `GET /v1/complaints/:complaintId`; responses are not cached. The 20 existing
+MCP definitions remain unchanged, for 21 tools total. No new migration is required.
+
+Legacy `resident_token` complaint calls now honor a supplied `idempotency_key`
+while preserving response fields. Original calls without a key remain compatible
+and cannot distinguish retries from new requests. Prefer keyed session-based
+creation. Neither display names nor complaint references authorize a status read.
+No participant identity mapping or lost-token recovery was added without a trusted
+Chord identity contract.
+
+See [observed incident evidence](field-notes/CHORD_ISSUE.md),
+[acceptance matrix](tests/ACCEPTANCE_TESTS.md) and [actual QA results](qa/V8_QA_LOG.md).
+The two original contradictory complaint references were both found in D1; Chord
+trace/revision/history delivery remains unverified here and is user-handled.

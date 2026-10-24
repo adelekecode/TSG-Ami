@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { appendFileSync, writeFileSync, chmodSync } from "node:fs";
 // Cloudflare tail envelopes may contain request headers. Keep them in memory only;
 // persist/print only our explicitly allowlisted audit fields, never raw envelopes.
-const output = ".wrangler/v7-payment-audit.ndjson";
+const output = process.env.AMI_AUDIT_OUTPUT ?? ".wrangler/v7-payment-audit.ndjson";
 writeFileSync(output, "", { mode: 0o600 });
 chmodSync(output, 0o600);
 const tools = new Set([
@@ -12,6 +12,8 @@ const tools = new Set([
   "get_my_invoices",
   "create_payment_link",
   "check_latest_payment",
+  "create_complaint",
+  "get_complaint_status",
 ]);
 const events = new Set([
   "mcp_tool_invoked",
@@ -29,6 +31,9 @@ const statuses = new Set([
   "not_started",
   "initializing",
   "error",
+  "open",
+  "in_review",
+  "resolved",
 ]);
 const child = spawn(
   "node_modules/.bin/wrangler",
@@ -64,6 +69,8 @@ function consume(event: any) {
       if (typeof data.code === "string" && /^[A-Z_]{1,64}$/.test(data.code))
         safe.code = data.code;
       if (typeof data.found === "boolean") safe.found = data.found;
+      if (typeof data.complaint_id === "string" && /^CMP-[a-f0-9-]{36}$/.test(data.complaint_id)) safe.complaint_id = data.complaint_id;
+      if (typeof data.created === "boolean") safe.created = data.created;
       if (statuses.has(data.status)) safe.status = data.status;
       const line = JSON.stringify(safe);
       appendFileSync(output, line + "\n");

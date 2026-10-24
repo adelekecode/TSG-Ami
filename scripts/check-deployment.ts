@@ -46,7 +46,7 @@ try {
         previous,
         `Existing tool changed: ${previous.name}`,
       );
-    assert.equal(tools.length, 20);
+    assert.equal(tools.length, 21);
     const call = async (name: string, args: Record<string, unknown>) => {
       const result = await client.callTool({ name, arguments: args });
       assert(!result.isError, `Deployed tool failed: ${name}`);

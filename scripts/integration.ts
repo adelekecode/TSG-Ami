@@ -13,6 +13,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import app from "../src/index";
 import { getPaymentStatusByReference } from "../src/concierge";
 import { rememberPaymentForSession } from "../src/payment-session-store";
+import { getComplaintStatus } from "../src/complaint-status";
 import { execute, hash, type Env } from "../src/domain";
 
 // Disables remote D1 even though the preserved application config uses remote: true.
@@ -365,6 +366,39 @@ try {
   };
   const complaint = await json("/v1/complaints", complaintInput);
   assert.equal((await json("/v1/complaints", complaintInput)).created, false);
+  // Simulate a lost successful response: recover by the original request key,
+  // without executing another write or depending on an assistant's account prose.
+  assert.equal((await getComplaintStatus(db, {
+    session_token:a.session_token, request_key:complaintInput.idempotency_key,
+  }) as any).complaint_id, complaint.complaint_id);
+  const complaintCount = (await rows("SELECT count(*) AS n FROM complaints"))[0].n;
+  const statusRead = await request(`/v1/complaints/${complaint.complaint_id}`,undefined,200,{token:a.session_token});
+  assert.equal(statusRead.headers.get("cache-control"),"no-store");
+  assert.equal(((await statusRead.json()) as any).status,"open");
+  assert.equal((await json(`/v1/complaints/${complaint.complaint_id}`,undefined,200,{token:b.session_token})).found,false);
+  await request(`/v1/complaints/${complaint.complaint_id}`,undefined,400);
+  await request(`/v1/complaints/${complaint.complaint_id}`,undefined,401,{token:"forged-complaint-capability"});
+  assert.equal((await rows("SELECT count(*) AS n FROM complaints"))[0].n,complaintCount);
+  await assert.rejects(getComplaintStatus(db,{session_token:a.session_token}));
+  await assert.rejects(getComplaintStatus(db,{session_token:a.session_token,complaint_id:complaint.complaint_id,request_key:complaintInput.idempotency_key}));
+  const concurrentInput={...complaintInput,idempotency_key:"v8-concurrent-parking",description:"Neighbours keep parking in my allocated parking spot."};
+  const concurrent=await Promise.all([json("/v1/complaints",concurrentInput),json("/v1/complaints",concurrentInput)]);
+  assert.equal(concurrent[0].complaint_id,concurrent[1].complaint_id);
+  assert.equal(concurrent.filter(row=>row.created).length,1);
+  assert.equal((await rows("SELECT count(*) AS n FROM requests WHERE id='"+concurrent[0].complaint_id+"'"))[0].n,1);
+  await request("/v1/complaints",{...concurrentInput,description:"Changed complaint description"},409);
+  const legacyKeyedInput={resident_token:a.session_token,description:"Legacy keyed parking complaint",idempotency_key:"v8-legacy-keyed-complaint"};
+  const legacyKeyed=await json("/v1/complaints",legacyKeyedInput);
+  const legacyRetry=await json("/v1/complaints",legacyKeyedInput);
+  assert.equal(legacyRetry.id,legacyKeyed.id);
+  assert.equal(legacyRetry.created,false);
+  await request("/v1/complaints",{...legacyKeyedInput,resident_token:b.session_token},409);
+  const oldComplaint=await json("/v1/complaints",{resident_token:a.session_token,description:"Original unkeyed complaint compatibility"});
+  assert.equal((await json(`/v1/complaints/${oldComplaint.id}`,undefined,200,{token:a.session_token})).complaint_id,oldComplaint.id);
+  const expiredComplaintToken="expired-complaint-capability-only";
+  await db.prepare("INSERT INTO sessions VALUES (?,?,1)").bind(await hash(expiredComplaintToken),"ten_001").run();
+  await request(`/v1/complaints/${complaint.complaint_id}`,undefined,401,{token:expiredComplaintToken});
+  console.log("Passed: v8 complaint lost-response recovery, read-only status, legacy keyed retries, concurrent deduplication, conflicts, legacy lookup, wrong-account and invalid/expired capability denial.");
   await request(
     "/v1/complaints",
     { ...complaintInput, session_token: b.session_token },
@@ -1510,7 +1544,7 @@ try {
       return JSON.parse((result.content as { text: string }[])[0].text);
     };
     const allTools = (await client.listTools()).tools;
-    assert.equal(allTools.length, 20);
+    assert.equal(allTools.length, 21);
     const discovery = await call("find_demo_profiles", { name: "Leke" });
     assert.equal(discovery.profiles.length, 1);
     const demo = await call("open_demo_profile", {
@@ -1613,11 +1647,19 @@ try {
       { session_token: a.session_token, ticket_id: mcpTicket.ticket.id },
       true,
     );
-    await call("create_complaint", {
+    const mcpComplaint = await call("create_complaint", {
       ...complaintInput,
       ...session,
       idempotency_key: "integration-mcp-complaint",
     });
+    const beforeStatusCount=(await rows("SELECT count(*) AS n FROM complaints"))[0].n;
+    assert.equal((await call("get_complaint_status",{...session,complaint_id:mcpComplaint.complaint_id})).found,true);
+    assert.equal((await call("get_complaint_status",{...session,request_key:"integration-mcp-complaint"})).complaint_id,mcpComplaint.complaint_id);
+    assert.equal((await call("get_complaint_status",{session_token:a.session_token,complaint_id:mcpComplaint.complaint_id})).found,false);
+    assert.equal((await call("get_complaint_status",session,true)).error,"INVALID_INPUT");
+    await call("get_complaint_status",{...session,complaint_id:mcpComplaint.complaint_id,request_key:"integration-mcp-complaint"},true);
+    await call("get_complaint_status",{session_token:"forged-complaint-capability",complaint_id:mcpComplaint.complaint_id},true);
+    assert.equal((await rows("SELECT count(*) AS n FROM complaints"))[0].n,beforeStatusCount);
     const link = await call("create_payment_link", {
       ...session,
       invoice_id: "RENT-C302-NOV",
@@ -1657,7 +1699,7 @@ try {
     await client.close();
   }
   console.log(
-    "Passed: all 20 MCP tools discovered, original REST/MCP regression suite and new MCP workflows over real Streamable HTTP.",
+    "Passed: all 21 MCP tools discovered, original REST/MCP regression suite and new MCP workflows over real Streamable HTTP.",
   );
 
   const capturedAudit = auditMessages.map((message) => JSON.parse(message));
@@ -1667,6 +1709,8 @@ try {
     "get_my_invoices",
     "create_payment_link",
     "check_latest_payment",
+    "create_complaint",
+    "get_complaint_status",
   ]) {
     assert(
       capturedAudit.some(
