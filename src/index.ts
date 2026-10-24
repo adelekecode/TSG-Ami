@@ -1,3 +1,4 @@
+import { findDemoProfiles, openDemoProfile, createDemoResident, startResidentRegistration, getOnboardingStatus } from "./onboarding";
 import { Hono } from "hono";
 import { z } from "zod";
 import { registerConciergeTools } from "./mcp";
@@ -76,6 +77,28 @@ app.post("/v1/complaints", async (c) => {
     : await execute(c.env, "create_complaint", input));
 });
 const residentSession = (c: { req: { header(name: string): string | undefined } }) => c.req.header("x-demo-session") ?? "";
+app.get("/v1/demo/profiles", async (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json(await findDemoProfiles(c.env, { name: c.req.query("name") }));
+});
+app.post("/v1/demo/sessions", async (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json(await openDemoProfile(c.env, await c.req.json()));
+});
+app.post("/v1/demo/residents", async (c) => {
+  c.header("Cache-Control", "no-store");
+  const result = await createDemoResident(c.env, await c.req.json());
+  return c.json(result, result.created ? 201 : 200);
+});
+app.post("/v1/onboarding/registrations", async (c) => {
+  c.header("Cache-Control", "no-store");
+  const result = await startResidentRegistration(c.env, await c.req.json());
+  return c.json(result, result.created ? 201 : 200);
+});
+app.get("/v1/onboarding/status", async (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json(await getOnboardingStatus(c.env, c.req.header("x-registration-session") ?? ""));
+});
 app.get("/v1/me", async (c) => c.json(await myProfile(c.env.DB, residentSession(c))));
 app.get("/v1/invoices", async (c) => c.json(await myInvoices(c.env.DB, residentSession(c))));
 app.post("/v1/payments/initialize", async (c) => c.json(await startPayment(c.env, await c.req.json(), new URL(c.req.url).origin)));
@@ -92,7 +115,7 @@ app.patch("/v1/tickets/:id/status", async (c) => c.json({ ticket: await updateTi
 app.all("/mcp", async (c) => {
   const server = new McpServer({
     name: "ami-tenant-concierge",
-    version: "0.2.0",
+    version: "0.4.0",
   });
   for (const name of Object.keys(schemas) as ToolName[]) {
     if (name === "create_maintenance_ticket" || name === "create_complaint") continue;

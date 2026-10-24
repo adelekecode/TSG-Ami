@@ -1,5 +1,11 @@
 import { z } from "zod";
-export type Env = { DB: D1Database; API_KEY?: string; DEMO_API_TOKEN?: string; PAYSTACK_SECRET_KEY?: string };
+export type Env = {
+  DB: D1Database;
+  API_KEY?: string;
+  DEMO_API_TOKEN?: string;
+  PAYSTACK_SECRET_KEY?: string;
+  DEMO_MODE?: string;
+};
 export class DomainError extends Error {
   constructor(
     message: string,

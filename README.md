@@ -11,13 +11,14 @@ npm ci
 test -e .dev.vars || cp .dev.vars.example .dev.vars
 # Replace API_KEY in .dev.vars with a long random secret.
 npm run db:migrate
-npm run db:seed
+npm run db:seed:local
 npm run dev
 ```
 
 The initial setup created `.dev.vars` with a random local service key. Keep that file private. Wrangler serves http://127.0.0.1:8787. The D1 binding is configured with `remote: true`, so local Worker code connects to Cloudflare D1; local D1 commands still use Wrangler's local database. `/health` is public; other endpoints require `Authorization: Bearer <API_KEY>`. Do not put the service key in a public frontend.
 
 ```sh
+npm run lint  # TypeScript unused-declaration checks
 npm run typecheck
 npm run build   # deployment dry run only
 npm test       # isolated local D1 + mocked Paystack; no running Worker or secrets needed
@@ -144,3 +145,104 @@ The additional fixtures retain A204's `AMI-DEMO-204` code and existing rent amou
 New tickets and complaints appear in the original request list. Paying a migrated rent invoice also updates the original rent summary, retaining prior partial payments. New tenant operations require a resident session; the service administration endpoint must remain restricted to trusted integrations.
 
 See [payment chat flow](docs/paystack-chat-flow.md) and [merge verification](docs/merge-verification.md) for the feature mapping and verification limits. Hosted Paystack checkout and Chord simulator integration still require end-to-end testing. Production payment concurrency, reconciliation, refunds and identity integration remain outside this demo's scope.
+
+
+## Demo profile discovery — v5
+
+Ami can now use `find_demo_profiles({name?})` to offer fictional sample accounts,
+then `open_demo_profile({demo_profile_id,confirmed:true})` after the tester chooses one.
+The nine concierge tools and five legacy tools remain available (16 total tools).
+Names are search hints. A selected sample is not proof of identity.
+
+Both operations require integration bearer authentication, `DEMO_MODE="true"`, and
+an existing `PAYSTACK_SECRET_KEY` starting with `sk_test_`. A missing or live key
+blocks both operations. The flag is enabled in this demo Worker's Wrangler vars;
+turn it off before using a deployment with real tenancy data. Existing normal
+verification routes remain unchanged. New selection sessions use the existing
+`sessions` table and hashed bearer capabilities, expiring after 30 minutes; original
+verification sessions retain their existing lifetime. Already issued capabilities
+remain valid until expiry; disabling discovery does not revoke sessions.
+
+REST equivalents (same gates and authorization):
+
+- `GET /v1/demo/profiles?name=Leke`
+- `POST /v1/demo/sessions` with `{"demo_profile_id":"demo_leke_l410","confirmed":true}`
+
+Discovery returns `profiles` and, if no match was found, `sample_profiles`. The total
+is bounded to five. Each candidate contains only `demo_profile_id`, `display_name`,
+`property_name`, and `building_label`. The registry enrolls four known fictional
+fixtures: Leke at L410, the existing Seuns at A204 and B101, and Ada at C302. Other
+residents are not implicitly enrolled. Only the separate seed can enroll records;
+there is no public enrollment API. No names automatically open accounts.
+
+Migration `0003_demo_profiles.sql` adds only the demo allowlist. `seed-demo.sql`
+adds Leke with a distinct unit, a fictional billing email, a NGN 96,000 rent invoice,
+and a NGN 3,150 electricity invoice, then enrolls known fixture IDs and credentials.
+All inserts are repeatable and preserve prior data and balances. Leke's optional
+legacy demo pair is `L410` / `AMI-L410-DEMO`; the selection flow doesn't require it.
+
+```sh
+npm run db:seed:demo        # local migrations + base, concierge and discovery seeds
+npm run db:seed:demo:remote # explicitly applies the same sequence to Cloudflare D1
+npm run deploy
+```
+
+Capabilities are returned internally to the integration/model so it can call the
+existing resident tools. Backend logs never print them, and demo REST responses
+are not cacheable. The Chord skill instructs Ami never to print or memorize tokens;
+this behavior still depends on the host/model honoring those instructions. No
+trusted per-resident Chord sender metadata has been verified. Continuity is scoped
+to the active conversation and token lifetime; caller-supplied `sender_id` is not
+used for authorization. The Chord page/tool refresh was reported handled by the
+user and was not independently inspected here.
+
+
+## Resident onboarding v6
+
+The existing demo discovery and selection tools now work alongside
+`create_demo_resident`, `start_resident_registration` and `get_onboarding_status`.
+There are 19 MCP tools in total: all 16 previously deployed definitions are retained
+and three are added. `skills/SKILL.md` is the v6 Chord skill, also mirrored at
+`chord/SKILL.md` for the existing workflow.
+
+- Existing fictional account: search a name hint, confirm a returned profile, open
+  it, then use its private resident session for tenancy, invoices and service tools.
+- Visitor: with permission and a stable `request_key`, atomically create a fictional
+  unit, resident, tenancy, rent invoice, electricity invoice, demo allowlist entry,
+  and a 30-minute resident session. Repeating the same request reuses the account;
+  changing its name or property with that key is a 409 conflict. Default sample
+  bills are NGN 75,000 rent and NGN 2,350 electricity. No real lease is created.
+- Claimed resident not registered: with consent, record a pending request and return
+  a reference plus a private 24-hour lookup token. The token can only check that
+  registration's status; it cannot access resident records or invoices. No manager
+  notification or real account activation is implemented. Retries preserve existing
+  valid lookup tokens and detect changes to all supplied details.
+
+All five onboarding tools and their REST routes require the existing integration
+credential, `DEMO_MODE="true"` and a nonempty Paystack test key. Existing flag-off
+responses remain 404 `DEMO_DISABLED`; missing/live keys return 503 `TEST_KEY_REQUIRED`.
+Generated demo profiles and pending registrations each have a transactional cap of
+500 records to bound this exercise. Expired session capabilities do not authenticate
+new chats, and no sender identity mapping is introduced.
+
+Additional REST routes:
+
+| Route | Input |
+| --- | --- |
+| `POST /v1/demo/residents` | `{display_name,property?,confirmed:true,request_key}` |
+| `POST /v1/onboarding/registrations` | `{display_name,property_hint?,unit_hint?,notes?,confirmed:true,request_key}` |
+| `GET /v1/onboarding/status` | Private `X-Registration-Session` header |
+
+Use `cedar_court` or `palm_heights` for the optional property; it defaults to
+`cedar_court`. First creation returns 201; an identical retry returns 200. Never
+log or print `session_token` or `registration_token`. The supplied module was
+adapted to the actual `preferred_name`, `tenancies`, `sessions` and existing
+`demo_profiles` schema. Migration `0004_demo_onboarding.sql` extends 0003, which
+was already deployed; it does not recreate or reset the schema or enroll arbitrary
+residents with example.com addresses.
+
+Run `npm run lint`, `npm run typecheck`, `npm test`, and `npm run build` before
+`npm run db:migrate:remote` and `npm run deploy`. No new static seed is required for
+v6 visitor creation. Detailed observed outcomes and exact commands are recorded in
+[ONBOARDING_V6.md](ONBOARDING_V6.md). The user is handling Chord; simulator checks
+and publication must not be inferred from successful backend tests.

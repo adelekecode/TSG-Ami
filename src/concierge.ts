@@ -232,6 +232,8 @@ export async function startPayment(
   origin: string,
 ) {
   const { session_token, invoice_id } = startPaymentSchema.parse(input);
+  if (!env.PAYSTACK_SECRET_KEY?.startsWith("sk_test_"))
+    throw new ApiError(503, "TEST_KEY_REQUIRED", "Paystack test key is missing. Live keys are blocked in this exercise.");
   const r = await verifiedResident(env.DB, session_token);
   const i = await ownedInvoice(env.DB, r.id, invoice_id);
   if (i.status === "paid")

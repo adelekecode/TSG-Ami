@@ -106,7 +106,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 async function request(
   path: string,
   body?: unknown,
-  expected = 200,
+  expected: number | readonly number[] = 200,
   options: {
     method?: string;
     token?: string;
@@ -134,7 +134,7 @@ async function request(
     env,
     ctx,
   );
-  assert.equal(response.status, expected, await response.clone().text());
+  assert((typeof expected === "number" ? [expected] : expected).includes(response.status), `Expected ${expected}, got ${response.status}: ${await response.clone().text()}`);
   return response;
 }
 const json = async (...args: Parameters<typeof request>) =>
@@ -506,6 +506,221 @@ try {
     "Passed: mocked Paystack initialization/reuse, server amounts, live-key rejection, failures/mismatches, signed duplicate webhooks and rent reconciliation.",
   );
 
+  // v5 demo onboarding reuses the current hashed session store and all private APIs.
+  await sql("migrations/0003_demo_profiles.sql");
+  await sql("seed-demo.sql");
+  const demoSeed = await rows("SELECT * FROM demo_profiles ORDER BY demo_profile_id");
+  const demoInvoices = await rows("SELECT * FROM invoices ORDER BY id");
+  await sql("seed-demo.sql");
+  assert.deepEqual(await rows("SELECT * FROM demo_profiles ORDER BY demo_profile_id"), demoSeed);
+  assert.deepEqual(await rows("SELECT * FROM invoices ORDER BY id"), demoInvoices);
+  assert.equal(demoSeed.length, 4);
+  const sessionCount = (await rows("SELECT count(*) AS n FROM sessions"))[0].n;
+  for (const flag of [undefined, "false", "TRUE", "1"]) {
+    env.DEMO_MODE = flag;
+    await request("/v1/demo/profiles?name=Leke", undefined, 404);
+    await request("/v1/demo/sessions", { demo_profile_id: "demo_leke_l410", confirmed: true }, 404);
+  }
+  env.DEMO_MODE = "true";
+  for (const key of [undefined, "sk_live_BLOCKED", "sk_test_"]) {
+    env.PAYSTACK_SECRET_KEY = key;
+    await request("/v1/demo/profiles?name=Leke", undefined, 503);
+    await request("/v1/demo/sessions", { demo_profile_id: "demo_leke_l410", confirmed: true }, 503);
+  }
+  env.PAYSTACK_SECRET_KEY = savedKey;
+  assert.equal((await rows("SELECT count(*) AS n FROM sessions"))[0].n, sessionCount);
+  await request("/v1/demo/profiles?name=Leke", undefined, 401, { key: "wrong" });
+  await request("/v1/demo/sessions", { demo_profile_id: "demo_leke_l410", confirmed: true }, 401, { key: "wrong" });
+  const leke = await json("/v1/demo/profiles?name=%20LEKE%20");
+  assert.equal(leke.profiles.length, 1);
+  assert.equal(leke.profiles[0].display_name, "Leke");
+  assert.deepEqual(leke.sample_profiles, []);
+  assert.equal((await request("/v1/demo/profiles")).headers.get("cache-control"), "no-store");
+  const seuns = await json("/v1/demo/profiles?name=seun");
+  assert.equal(seuns.profiles.length, 2);
+  assert.notEqual(seuns.profiles[0].building_label, seuns.profiles[1].building_label);
+  for (const query of ["Someone%20New", "Nneka", "%25", "'%20OR%201=1--"]) {
+    const absent = await json("/v1/demo/profiles?name="+query);
+    assert.deepEqual(absent.profiles, []);
+    assert(absent.sample_profiles.length > 0 && absent.sample_profiles.length <= 5);
+  }
+  for (const profile of [...leke.profiles, ...seuns.profiles, ...(await json("/v1/demo/profiles")).sample_profiles])
+    assert.deepEqual(Object.keys(profile).sort(), ["building_label", "demo_profile_id", "display_name", "property_name"]);
+  // More than five eligible records must still return at most five options.
+  for (let i=0;i<6;i++) await db.batch([
+    db.prepare("INSERT INTO residents(id,preferred_name) VALUES (?, 'Bounded')").bind(`test_r_${i}`),
+    db.prepare("INSERT INTO units(id,property_name) VALUES (?, 'Fictional limit fixture')").bind(`TEST${i}`),
+    db.prepare("INSERT INTO tenancies VALUES (?,?,?,?,1)").bind(`test_t_${i}`,`test_r_${i}`,`TEST${i}`,"test-only-hash"),
+    db.prepare("INSERT INTO demo_profiles VALUES (?,?)").bind(`demo_test_${i}`,`test_t_${i}`),
+  ]);
+  assert.equal((await json("/v1/demo/profiles?name=bounded")).profiles.length, 5);
+  assert.equal((await json("/v1/demo/profiles?name=Someone%20New")).sample_profiles.length, 5);
+  await db.prepare("DELETE FROM demo_profiles WHERE demo_profile_id LIKE 'demo_test_%'").run();
+  await request("/v1/demo/profiles?name="+"x".repeat(81), undefined, 400);
+  for (const body of [
+    { demo_profile_id: "demo_leke_l410" },
+    { demo_profile_id: "demo_leke_l410", confirmed: false },
+    { demo_profile_id: "ten_001", confirmed: true },
+    { demo_profile_id: "demo_leke_l410", confirmed: true, sender_id: "untrusted" },
+  ]) await request("/v1/demo/sessions", body, 400);
+  await request("/v1/demo/sessions", { demo_profile_id: "demo_unknown", confirmed: true }, 404);
+  await db.prepare("UPDATE units SET active=0 WHERE id='L410'").run();
+  assert.equal((await json("/v1/demo/profiles?name=Leke")).profiles.length, 0);
+  await request("/v1/demo/sessions", { demo_profile_id: "demo_leke_l410", confirmed: true }, 404);
+  await db.prepare("UPDATE units SET active=1 WHERE id='L410'").run();
+  const opened = await json("/v1/demo/sessions", { demo_profile_id: leke.profiles[0].demo_profile_id, confirmed: true });
+  assert.equal(opened.mode, "demo");
+  assert.equal(opened.expires_in_seconds, 1800);
+  const capability = (await db.prepare("SELECT * FROM sessions WHERE token_hash=?").bind(await hash(opened.session_token)).first()) as any;
+  assert(capability.expires_at - Math.floor(Date.now()/1000) <= 1800);
+  assert(capability.expires_at - Math.floor(Date.now()/1000) >= 1795);
+  assert.notEqual(capability.token_hash, opened.session_token);
+  const lekeAuth = { token: opened.session_token };
+  const lekeProfile = await json("/v1/me", undefined, 200, lekeAuth);
+  assert.equal(lekeProfile.name, "Leke");
+  assert.equal(lekeProfile.unit_id, "L410");
+  assert(!JSON.stringify(lekeProfile).includes(opened.session_token));
+  const bills = (await json("/v1/invoices", undefined, 200, lekeAuth)).invoices;
+  assert.equal(bills.length, 2);
+  assert(bills.some((i: any) => i.type === "rent" && i.status === "unpaid"));
+  assert(bills.some((i: any) => i.type === "utility" && i.amount_kobo === 315000));
+  await request("/v1/payments/ELEC-A204-OCT", undefined, 404, lekeAuth);
+  const lekePayment = { session_token: opened.session_token, invoice_id: "ELEC-L410-OCT", confirmed: true };
+  await request("/v1/payments/initialize", { ...lekePayment, confirmed: false }, 400);
+  await request("/v1/payments/initialize", { ...lekePayment, invoice_id: "ELEC-A204-OCT" }, 404);
+  const lekeLink = await json("/v1/payments/initialize", { ...lekePayment, amount: 1 });
+  assert.equal(lastInitialization.amount, "315000");
+  assert.equal(lekeLink.checkout_url, "https://checkout.paystack.com/integration-test");
+  assert.equal(lekeLink.environment, "test");
+  env.PAYSTACK_SECRET_KEY = "sk_live_BLOCKED";
+  await request("/v1/payments/initialize", lekePayment, 503); // Even reuse is blocked.
+  env.PAYSTACK_SECRET_KEY = savedKey;
+  verifyAmount = 315000;
+  providerMode = "pending";
+  assert.equal((await json("/v1/payments/ELEC-L410-OCT", undefined, 200, lekeAuth)).verified_paid, false);
+  assert.equal((await rows("SELECT status FROM invoices WHERE id='ELEC-L410-OCT'"))[0].status, "unpaid");
+  providerMode = "success";
+  assert.equal((await json("/v1/payments/ELEC-L410-OCT", undefined, 200, lekeAuth)).verified_paid, true);
+  await json("/v1/complaints", { ...complaintInput, session_token: opened.session_token, idempotency_key: "demo-leke-complaint" });
+  await json("/v1/tickets", { ...ticketInput, session_token: opened.session_token, unit_id: "L410", idempotency_key: "demo-leke-ticket" }, 201);
+  await db.prepare("UPDATE sessions SET expires_at=1 WHERE token_hash=?").bind(await hash(opened.session_token)).run();
+  await request("/v1/me", undefined, 401, lekeAuth);
+  console.log("Passed: v5 fictional allowlist, bounded/case-insensitive discovery, safe no-match samples, duplicate names, explicit selection, flag/live-key gates, hashed 30-minute sessions, private ownership and mocked test checkout.");
+
+  // v6 visitor and pending-registration paths, adapted to the existing tenancy schema.
+  const preV6Profiles = await rows("SELECT demo_profile_id,tenancy_id FROM demo_profiles ORDER BY 1");
+  await sql("migrations/0004_demo_onboarding.sql");
+  assert.deepEqual(await rows("SELECT demo_profile_id,tenancy_id FROM demo_profiles ORDER BY 1"), preV6Profiles);
+  const count = async (table: string) => Number((await rows(`SELECT count(*) AS n FROM ${table}`))[0].n);
+  const businessCounts = async () => Promise.all(["units","residents","tenancies","invoices","rent_invoices","demo_profiles","sessions"].map(count));
+  const visitorInput = { display_name:"Demo Visitor", confirmed:true, request_key:"v6-visitor-request-0001" };
+  const registrationInput = { display_name:"Pending Demo Applicant",property_hint:"Fictional residence",unit_hint:"Example A204",notes:"Fictional registration test",confirmed:true,request_key:"v6-registration-request-0001" };
+  for (const bad of [
+    {...visitorInput,confirmed:false}, {...visitorInput,display_name:"x"}, {...visitorInput,display_name:"<script>"},
+    {...visitorInput,request_key:"short"}, {...visitorInput,property:"unknown"}, {...visitorInput,sender_id:"untrusted"},
+    {confirmed:true,request_key:"v6-invalid-no-name-0001"},
+  ]) await request("/v1/demo/residents",bad,400);
+  await request("/v1/demo/residents",visitorInput,401,{key:"wrong"});
+  const beforeVisitor = await businessCounts();
+  const visitor = await json("/v1/demo/residents",visitorInput,201);
+  assert.equal(visitor.created,true);
+  assert.equal(visitor.mode,"demo");
+  assert.deepEqual(await businessCounts(),beforeVisitor.map((n,i)=>n+(i===3?2:1)));
+  const visitorAuth = {token:visitor.session_token};
+  const visitorProfile = await json("/v1/me",undefined,200,visitorAuth);
+  assert.equal(visitorProfile.name,"Demo Visitor");
+  assert(visitorProfile.unit_id.startsWith("DM-"));
+  const visitorBills = (await json("/v1/invoices",undefined,200,visitorAuth)).invoices;
+  assert.equal(visitorBills.length,2);
+  assert(visitorBills.some((i:any)=>i.type==="rent" && i.amount_kobo===7500000));
+  const visitorUtility=visitorBills.find((i:any)=>i.type==="utility");
+  assert.equal(visitorUtility.amount_kobo,235000);
+  const stableBusinessCounts=(await businessCounts()).slice(0,6);
+  const again=await json("/v1/demo/residents",visitorInput);
+  assert.equal(again.created,false);
+  assert.equal(again.profile.demo_profile_id,visitor.profile.demo_profile_id);
+  assert.deepEqual((await businessCounts()).slice(0,6),stableBusinessCounts);
+  for(const change of [{display_name:"Different Visitor"},{property:"palm_heights"}])
+    await request("/v1/demo/residents",{...visitorInput,...change},409);
+  assert.equal((await json("/v1/demo/profiles?name=Demo%20Visitor")).profiles[0].demo_profile_id,visitor.profile.demo_profile_id);
+  const reopenedVisitor=await json("/v1/demo/sessions",{demo_profile_id:visitor.profile.demo_profile_id,confirmed:true});
+  assert.equal((await json("/v1/me",undefined,200,{token:reopenedVisitor.session_token})).unit_id,visitorProfile.unit_id);
+  // Concurrent identical retries create one business account; conflicting retries cannot switch property.
+  const raceInput={...visitorInput,request_key:"v6-visitor-concurrent-0001"};
+  const raced=await Promise.all([json("/v1/demo/residents",raceInput,[200,201]),json("/v1/demo/residents",raceInput,[200,201])]);
+  assert.deepEqual(raced.map(x=>x.created).sort(),[false,true]);
+  assert.equal(raced[0].profile.demo_profile_id,raced[1].profile.demo_profile_id);
+  assert.equal((await rows("SELECT * FROM demo_profiles WHERE creation_key='v6-visitor-concurrent-0001'")).length,1);
+  const conflictKey="v6-visitor-conflicting-0001";
+  const conflictResults=await Promise.all([
+    request("/v1/demo/residents",{...visitorInput,request_key:conflictKey},[201,409]),
+    request("/v1/demo/residents",{...visitorInput,property:"palm_heights",request_key:conflictKey},[201,409]),
+  ]);
+  assert.deepEqual(conflictResults.map(x=>x.status).sort(),[201,409]);
+  assert.equal((await rows("SELECT * FROM demo_profiles WHERE creation_key='v6-visitor-conflicting-0001'")).length,1);
+  // A failure on the second invoice must roll back units, resident, tenancy, registry,
+  // first invoice and session together, rather than leaving half an account.
+  await db.prepare("CREATE TRIGGER test_abort_utility BEFORE INSERT ON invoices WHEN NEW.description='Sample electricity bill' BEGIN SELECT RAISE(ABORT,'injected-test-failure'); END").run();
+  const beforeFailure=await businessCounts();
+  const originalError=console.error;
+  const logs:string[]=[];
+  console.error=(...args:unknown[])=>{logs.push(args.map(String).join(" "));};
+  try { await request("/v1/demo/residents",{...visitorInput,request_key:"v6-atomic-failure-0001"},500); }
+  finally { console.error=originalError; }
+  assert.deepEqual(await businessCounts(),beforeFailure);
+  assert(logs.every(line=>!line.includes(visitor.session_token)));
+  await db.prepare("DROP TRIGGER test_abort_utility").run();
+  await request("/v1/payments/ELEC-A204-OCT",undefined,404,visitorAuth);
+  await json("/v1/complaints",{...complaintInput,session_token:visitor.session_token,idempotency_key:"v6-visitor-complaint"});
+  await json("/v1/tickets",{...ticketInput,session_token:visitor.session_token,unit_id:visitorProfile.unit_id,idempotency_key:"v6-visitor-ticket"},201);
+  const visitorPayment=await json("/v1/payments/initialize",{session_token:visitor.session_token,invoice_id:visitorUtility.invoice_id,confirmed:true});
+  assert.equal(visitorPayment.checkout_url,"https://checkout.paystack.com/integration-test");
+  assert.equal(lastInitialization.amount,"235000");
+  verifyAmount=235000;
+  providerMode="pending";
+  assert.equal((await json(`/v1/payments/${visitorUtility.invoice_id}`,undefined,200,visitorAuth)).verified_paid,false);
+  assert.equal((await rows(`SELECT status FROM invoices WHERE id='${visitorUtility.invoice_id}'`))[0].status,"unpaid");
+  providerMode="success";
+  assert.equal((await json(`/v1/payments/${visitorUtility.invoice_id}`,undefined,200,visitorAuth)).verified_paid,true);
+  for(const bad of [{...registrationInput,confirmed:false},{...registrationInput,notes:"x".repeat(501)},{...registrationInput,display_name:"<bad>"}])
+    await request("/v1/onboarding/registrations",bad,400);
+  const beforeRegistration=await businessCounts();
+  const registration=await json("/v1/onboarding/registrations",registrationInput,201);
+  assert.equal(registration.status,"pending");
+  assert.equal(registration.access_granted,false);
+  assert(!("session_token" in registration));
+  assert.deepEqual(await businessCounts(),beforeRegistration);
+  const statusAuth={headers:{"x-registration-session":registration.registration_token}};
+  assert.equal((await json("/v1/onboarding/status",undefined,200,statusAuth)).registration_id,registration.registration_id);
+  await request("/v1/me",undefined,401,{token:registration.registration_token});
+  await request("/v1/invoices",undefined,401,{token:registration.registration_token});
+  await request("/v1/onboarding/status",undefined,400,{headers:{"x-registration-session":registration.registration_id}});
+  await request("/v1/onboarding/status",undefined,404,{headers:{"x-registration-session":visitor.session_token}});
+  const registrationAgain=await json("/v1/onboarding/registrations",registrationInput);
+  assert.equal(registrationAgain.created,false);
+  assert.equal(registrationAgain.registration_id,registration.registration_id);
+  assert.equal((await json("/v1/onboarding/status",undefined,200,statusAuth)).status,"pending"); // Prior lookup token stays valid.
+  for(const change of [{display_name:"Another Applicant"},{property_hint:"Another property"},{notes:"Different notes"}])
+    await request("/v1/onboarding/registrations",{...registrationInput,...change},409);
+  assert.equal((await rows("SELECT * FROM onboarding_registrations WHERE request_key='v6-registration-request-0001'")).length,1);
+  const registrationRaceInput={...registrationInput,request_key:"v6-registration-concurrent-0001"};
+  const registrationRace=await Promise.all([json("/v1/onboarding/registrations",registrationRaceInput,[200,201]),json("/v1/onboarding/registrations",registrationRaceInput,[200,201])]);
+  assert.deepEqual(registrationRace.map(x=>x.created).sort(),[false,true]);
+  assert.equal(registrationRace[0].registration_id,registrationRace[1].registration_id);
+  for(const result of registrationRace)
+    assert.equal((await json("/v1/onboarding/status",undefined,200,{headers:{"x-registration-session":result.registration_token}})).status,"pending");
+  await db.prepare("UPDATE onboarding_registration_sessions SET expires_at=1 WHERE token_hash=?").bind(await hash(registration.registration_token)).run();
+  await request("/v1/onboarding/status",undefined,404,statusAuth);
+  const demoRoutes:[string,unknown][]=[
+    ["/v1/demo/residents",visitorInput], ["/v1/onboarding/registrations",registrationInput], ["/v1/onboarding/status",undefined],
+  ];
+  for(const [flag,key,expected] of [["false",savedKey,404],["true","sk_live_BLOCKED",503],["true",undefined,503]] as const) {
+    env.DEMO_MODE=flag; env.PAYSTACK_SECRET_KEY=key;
+    for(const [path,body] of demoRoutes) await request(path,body,expected,statusAuth);
+  }
+  env.DEMO_MODE="true"; env.PAYSTACK_SECRET_KEY=savedKey;
+  console.log("Passed: v6 visitor atomic creation/rollback, retry/conflict isolation, generated account invoices/maintenance/complaints/test checkout, pending registration separation, private lookup expiry, and demo/live-key gates.");
+
   // Exercise the real MCP client and HTTP transport, plus the original REST smoke suite.
   // Reset test-only rates/balances so original fixtures have their expected state.
   await db.prepare("DELETE FROM verification_attempts").run();
@@ -572,6 +787,27 @@ try {
       assert.equal(Boolean(result.isError), isError, JSON.stringify(result));
       return JSON.parse((result.content as { text: string }[])[0].text);
     };
+    const allTools = (await client.listTools()).tools;
+    assert.equal(allTools.length, 19);
+    const discovery = await call("find_demo_profiles", { name: "Leke" });
+    assert.equal(discovery.profiles.length, 1);
+    const demo = await call("open_demo_profile", { demo_profile_id: discovery.profiles[0].demo_profile_id, confirmed: true });
+    assert.equal((await call("get_my_profile", { session_token: demo.session_token })).name, "Leke");
+    assert.equal((await call("get_my_invoices", { session_token: demo.session_token })).invoices.length, 2);
+    env.DEMO_MODE = "false";
+    await call("find_demo_profiles", {}, true);
+    await call("open_demo_profile", { demo_profile_id: "demo_leke_l410", confirmed: true }, true);
+    env.DEMO_MODE = "true";
+    const newVisitor=await call("create_demo_resident",{display_name:"MCP Demo Visitor",confirmed:true,request_key:"v6-mcp-new-visitor-0001"});
+    assert.equal((await call("get_my_profile",{session_token:newVisitor.session_token})).name,"MCP Demo Visitor");
+    assert.equal((await call("get_my_invoices",{session_token:newVisitor.session_token})).invoices.length,2);
+    const applicant=await call("start_resident_registration",{display_name:"MCP Demo Applicant",confirmed:true,request_key:"v6-mcp-registration-0001"});
+    assert.equal((await call("get_onboarding_status",{registration_token:applicant.registration_token})).access_granted,false);
+    await call("get_my_profile",{session_token:applicant.registration_token},true);
+    for(const name of ["create_demo_resident","start_resident_registration","get_onboarding_status"]) {
+      const bad=await client.callTool({name,arguments:{}});
+      assert.equal(bad.isError,true);
+    }
     const verified = await call("verify_resident", {
       unit_id: "C302",
       demo_code: "AMI-C302-DEMO",
@@ -629,7 +865,7 @@ try {
     await client.close();
   }
   console.log(
-    "Passed: all 14 MCP tools discovered, original REST/MCP regression suite and new MCP workflows over real Streamable HTTP.",
+    "Passed: all 19 MCP tools discovered, original REST/MCP regression suite and new MCP workflows over real Streamable HTTP.",
   );
 
   // A second empty database proves that fresh installs also work in migration order.
@@ -643,8 +879,11 @@ try {
     for (const file of [
       "migrations/0001_initial.sql",
       "migrations/0002_concierge_payments.sql",
+      "migrations/0003_demo_profiles.sql",
+      "migrations/0004_demo_onboarding.sql",
       "seed.sql",
       "seed-concierge.sql",
+      "seed-demo.sql",
     ])
       await fresh.env.DB.batch(
         splitSqlQuery(readFileSync(file, "utf8")).map((statement) =>
@@ -655,7 +894,7 @@ try {
       (await fresh.env.DB.prepare("SELECT count(*) AS n FROM invoices").first<{
         n: number;
       }>())!.n,
-      16,
+      18,
     );
     assert.equal(
       (await fresh.env.DB.prepare("PRAGMA foreign_key_check").all()).results

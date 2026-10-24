@@ -1,3 +1,11 @@
+import { createDemoResident, startResidentRegistration, getOnboardingStatus, createDemoResidentSchema, startRegistrationSchema, registrationStatusSchema } from "./onboarding";
+import {
+  findDemoProfiles,
+  openDemoProfile,
+  findDemoProfilesSchema,
+  openDemoProfileSchema,
+} from "./onboarding";
+import type { Env } from "./domain";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { execute, DomainError } from "./domain";
@@ -16,7 +24,6 @@ import {
   myProfile,
   startPayment,
   verifyResident,
-  type PaystackEnv,
 } from "./concierge";
 
 const ok = (data: unknown) => ({
@@ -44,7 +51,7 @@ const fail = (err: unknown) => ({
 });
 export function registerConciergeTools(
   server: McpServer,
-  env: PaystackEnv,
+  env: Env,
   origin: string,
 ) {
   server.registerTool(
@@ -229,5 +236,47 @@ export function registerConciergeTools(
       }
     },
   );
+  server.registerTool(
+    "find_demo_profiles",
+    {
+      description:
+        "Discover at most five fictional sample profiles using a display name only as a search hint. Returns safe matches or sample options, never private account data. Ask the tester to choose and confirm a sample before opening it. Requires demo mode and a Paystack test key.",
+      inputSchema: findDemoProfilesSchema.shape,
+    },
+    async (params) => {
+      try {
+        return ok(await findDemoProfiles(env, params));
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
+  server.registerTool(
+    "open_demo_profile",
+    {
+      description:
+        "Open a chosen fictional profile ONLY after the tester explicitly confirms it. This is sample selection, not identity verification. Returns a private session_token valid for 30 minutes: NEVER print or log it or store it in conversational memory. Pass it internally to get_my_profile, get_my_invoices and other resident tools in this chat.",
+      inputSchema: openDemoProfileSchema.shape,
+    },
+    async (params) => {
+      try {
+        return ok(await openDemoProfile(env, params));
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
+  server.registerTool("create_demo_resident", {
+    description: "Demo/test only: after explicit permission, atomically persist a fictional resident, apartment, tenancy, rent invoice and electricity invoice. Reuse request_key on retries. The returned 30-minute session_token is private; never show it in chat or store it in memory. This does not establish real residency.",
+    inputSchema: createDemoResidentSchema.shape,
+  }, async (params) => { try { return ok(await createDemoResident(env,params)); } catch(e) { return fail(e); } });
+  server.registerTool("start_resident_registration", {
+    description: "Record an unverified pending registration with explicit consent and a request_key reused on retries. Grants NO resident/invoice access and sends NO manager notification. Keep the returned registration_token private.",
+    inputSchema: startRegistrationSchema.shape,
+  }, async (params) => { try { return ok(await startResidentRegistration(env,params)); } catch(e) { return fail(e); } });
+  server.registerTool("get_onboarding_status", {
+    description: "Check registration status using its private registration_token. A reference alone grants no lookup or tenancy access. Never print the token in chat.",
+    inputSchema: registrationStatusSchema.shape,
+  }, async ({registration_token}) => { try { return ok(await getOnboardingStatus(env,registration_token)); } catch(e) { return fail(e); } });
   return server;
 }
