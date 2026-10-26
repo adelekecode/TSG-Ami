@@ -74,17 +74,21 @@ export async function verifyResident(
   input: VerifyResidentInput,
 ) {
   const data = verifyResidentSchema.parse(input);
-  const result = await execute({ DB: db }, "resolve_resident", {
+  const result = (await execute({ DB: db }, "resolve_resident", {
     unit_id: data.unit_id.trim().toUpperCase(),
     onboarding_code: data.demo_code,
-  }) as { resident_token: string };
+  })) as { resident_token: string };
   const r = await verifiedResident(db, result.resident_token);
   const unit = await lookupUnit(db, r.unit_id);
   return {
     verified: true,
     session_token: result.resident_token,
     expires_in_minutes: 1440,
-    resident: { name: r.display_name, unit_id: r.unit_id, property: unit.property_name },
+    resident: {
+      name: r.display_name,
+      unit_id: r.unit_id,
+      property: unit.property_name,
+    },
   };
 }
 
@@ -100,13 +104,21 @@ async function verifiedResident(
     );
   const t = await tenancy({ DB: db }, token).catch((error: unknown) => {
     if (error instanceof DomainError)
-      throw new ApiError(error.status, "SESSION_EXPIRED", "Your verified session has expired. Please verify again.");
+      throw new ApiError(
+        error.status,
+        "SESSION_EXPIRED",
+        "Your verified session has expired. Please verify again.",
+      );
     throw error;
   });
-  const resident = await db.prepare(
-    "SELECT t.id, r.preferred_name AS display_name, r.email, t.unit_id, t.onboarding_hash AS demo_code_hash, t.active FROM tenancies t JOIN residents r ON r.id=t.resident_id WHERE t.id=?",
-  ).bind(t.id).first<ResidentRow>();
-  if (!resident) throw new ApiError(401, "SESSION_EXPIRED", "Please verify again.");
+  const resident = await db
+    .prepare(
+      "SELECT t.id, r.preferred_name AS display_name, r.email, t.unit_id, t.onboarding_hash AS demo_code_hash, t.active FROM tenancies t JOIN residents r ON r.id=t.resident_id WHERE t.id=?",
+    )
+    .bind(t.id)
+    .first<ResidentRow>();
+  if (!resident)
+    throw new ApiError(401, "SESSION_EXPIRED", "Please verify again.");
   return resident;
 }
 
@@ -234,7 +246,11 @@ export async function startPayment(
 ) {
   const { session_token, invoice_id } = startPaymentSchema.parse(input);
   if (!env.PAYSTACK_SECRET_KEY?.startsWith("sk_test_"))
-    throw new ApiError(503, "TEST_KEY_REQUIRED", "Paystack test key is missing. Live keys are blocked in this exercise.");
+    throw new ApiError(
+      503,
+      "TEST_KEY_REQUIRED",
+      "Paystack test key is missing. Live keys are blocked in this exercise.",
+    );
   const r = await verifiedResident(env.DB, session_token);
   const i = await ownedInvoice(env.DB, r.id, invoice_id);
   if (i.status === "paid")
@@ -244,12 +260,26 @@ export async function startPayment(
       message: "This invoice is already paid.",
     };
   if (i.currency !== "NGN")
-    throw new ApiError(409, "UNSUPPORTED_CURRENCY", "Test checkout currently supports NGN invoices only.");
-  const rememberCheckout = async (token:string, owner:string, invoiceId:string, ref:string) => {
-    try { await rememberPaymentForSession(env.DB,token,owner,invoiceId,ref); }
-    catch (error) {
+    throw new ApiError(
+      409,
+      "UNSUPPORTED_CURRENCY",
+      "Test checkout currently supports NGN invoices only.",
+    );
+  const rememberCheckout = async (
+    token: string,
+    owner: string,
+    invoiceId: string,
+    ref: string,
+  ) => {
+    try {
+      await rememberPaymentForSession(env.DB, token, owner, invoiceId, ref);
+    } catch (error) {
       if (error instanceof ApiError) throw error;
-      throw new ApiError(503,"PAYMENT_CONTEXT_UNAVAILABLE","The checkout was initialized, but its session context could not be saved. Retry to reuse the existing link.");
+      throw new ApiError(
+        503,
+        "PAYMENT_CONTEXT_UNAVAILABLE",
+        "The checkout was initialized, but its session context could not be saved. Retry to reuse the existing link.",
+      );
     }
   };
   const active = await env.DB.prepare(
@@ -259,7 +289,12 @@ export async function startPayment(
     .first<PaymentRow>();
   if (active) {
     if (active.status === "pending" && active.checkout_url) {
-      const result = paymentLinkResult(i, active.reference, active.checkout_url, true);
+      const result = paymentLinkResult(
+        i,
+        active.reference,
+        active.checkout_url,
+        true,
+      );
       await rememberCheckout(session_token, r.id, i.id, active.reference);
       return result;
     }
@@ -270,7 +305,11 @@ export async function startPayment(
     );
   }
   if (!r.email)
-    throw new ApiError(409, "PAYMENT_EMAIL_REQUIRED", "A verified billing email must be configured before checkout.");
+    throw new ApiError(
+      409,
+      "PAYMENT_EMAIL_REQUIRED",
+      "A verified billing email must be configured before checkout.",
+    );
   const reference = `AMI-${crypto.randomUUID()}`;
   const timestamp = now();
   const inserted = await env.DB.prepare(
@@ -313,11 +352,7 @@ export async function startPayment(
         "Unexpected response from Paystack.",
       );
     // Validate the returned URL before storing it or showing it to the resident.
-    chatResult = paymentLinkResult(
-      i,
-      reference,
-      result.authorization_url,
-    );
+    chatResult = paymentLinkResult(i, reference, result.authorization_url);
   } catch (e) {
     await env.DB.prepare(
       `UPDATE payment_attempts SET status='error',updated_at=? WHERE reference=? AND status='initializing'`,
@@ -331,10 +366,11 @@ export async function startPayment(
   // an already-created provider transaction as an initialization error.
   await env.DB.prepare(
     `UPDATE payment_attempts SET status='pending', checkout_url=?, updated_at=? WHERE reference=? AND status='initializing'`,
-  ).bind(chatResult.checkout_url, now(), reference).run();
-  await rememberCheckout(session_token,r.id,i.id,reference);
+  )
+    .bind(chatResult.checkout_url, now(), reference)
+    .run();
+  await rememberCheckout(session_token, r.id, i.id, reference);
   return chatResult;
-
 }
 
 async function verifyAttempt(env: PaystackEnv, attempt: PaymentRow) {
@@ -420,21 +456,54 @@ export async function getPaymentStatus(
     };
   return verifyAttempt(env, attempt);
 }
-export async function getPaymentStatusByReference(env:PaystackEnv,sessionToken:string,reference:string) {
-  const resident=await verifiedResident(env.DB,sessionToken);
-  if(typeof reference!=="string" || reference.length<8 || reference.length>128)
-    throw new ApiError(400,"INVALID_REFERENCE","The payment reference is invalid.");
-  const attempt=await env.DB.prepare("SELECT * FROM payment_attempts WHERE reference=? AND resident_id=? LIMIT 1")
-    .bind(reference,resident.id).first<PaymentRow>();
-  if(!attempt) throw new ApiError(404,"PAYMENT_NOT_FOUND","No payment found for this resident.");
-  const invoice=await ownedInvoice(env.DB,resident.id,attempt.invoice_id);
-  if(attempt.status==="initializing" || attempt.status==="error")
-    return {invoice:formatInvoice(invoice),reference,payment_status:attempt.status,verified_paid:false,
-      message:attempt.status==="initializing"?"A checkout link is still being prepared.":"The checkout could not be initialized."};
-  if(attempt.status==="success" && invoice.paid_reference===reference)
-    return {invoice:formatInvoice(invoice),reference,payment_status:"success",verified_paid:true};
+export async function getPaymentStatusByReference(
+  env: PaystackEnv,
+  sessionToken: string,
+  reference: string,
+) {
+  const resident = await verifiedResident(env.DB, sessionToken);
+  if (
+    typeof reference !== "string" ||
+    reference.length < 8 ||
+    reference.length > 128
+  )
+    throw new ApiError(
+      400,
+      "INVALID_REFERENCE",
+      "The payment reference is invalid.",
+    );
+  const attempt = await env.DB.prepare(
+    "SELECT * FROM payment_attempts WHERE reference=? AND resident_id=? LIMIT 1",
+  )
+    .bind(reference, resident.id)
+    .first<PaymentRow>();
+  if (!attempt)
+    throw new ApiError(
+      404,
+      "PAYMENT_NOT_FOUND",
+      "No payment found for this resident.",
+    );
+  const invoice = await ownedInvoice(env.DB, resident.id, attempt.invoice_id);
+  if (attempt.status === "initializing" || attempt.status === "error")
+    return {
+      invoice: formatInvoice(invoice),
+      reference,
+      payment_status: attempt.status,
+      verified_paid: false,
+      message:
+        attempt.status === "initializing"
+          ? "A checkout link is still being prepared."
+          : "The checkout could not be initialized.",
+    };
+  if (attempt.status === "success" && invoice.paid_reference === reference)
+    return {
+      invoice: formatInvoice(invoice),
+      reference,
+      payment_status: "success",
+      verified_paid: true,
+    };
   // Verify this exact row/reference. Never substitute the invoice's latest attempt.
-  return verifyAttempt(env,attempt);
+  return verifyAttempt(env, attempt);
 }
 export async function applySuccessfulWebhook(
   env: PaystackEnv,
