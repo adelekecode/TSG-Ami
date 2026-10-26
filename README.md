@@ -301,3 +301,18 @@ See [observed incident evidence](field-notes/CHORD_ISSUE.md),
 [acceptance matrix](tests/ACCEPTANCE_TESTS.md) and [actual QA results](qa/V8_QA_LOG.md).
 The two original contradictory complaint references were both found in D1; Chord
 trace/revision/history delivery remains unverified here and is user-handled.
+
+## Low-cost demo bills
+
+`seed-bills.sql` adds four unpaid utility bills to every existing tenancy:
+November electricity (NGN 7,500), November water (NGN 5,000), October waste
+collection (NGN 6,500, overdue), and November common-area service charge
+(NGN 10,000). These are fictional October/November 2026 fixtures, not recurring
+billing. The full demo seed commands include them.
+
+For an already populated database, run `npm run db:seed:bills` locally or
+`npm run db:seed:bills:remote` against deployed D1. Apply the existing migrations
+first on a fresh database. Stable invoice IDs make reruns safe: existing bills,
+payment statuses and references are preserved. Rerun after creating more demo
+accounts to add these four bills to those accounts too. No Worker deployment or
+Chord tool refresh is required.

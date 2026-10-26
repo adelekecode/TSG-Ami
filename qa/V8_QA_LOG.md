@@ -163,3 +163,13 @@ Remote read-only SQL was run with `npx wrangler d1 execute ami-db --remote --com
 for both exact references, owner/status/timestamp, distinct-key/description count,
 and the QA row/mirror count. Table/column names were checked against the existing
 migrations before those queries. No private token was included in SQL or output.
+
+
+## Follow-up recurrence supplied by the user
+
+Exact new reference `CMP-6ea27cb2-2f16-401d-96b5-e8a54e256043` was checked through
+read-only remote SQL. Result: open at A204, tenancy `ten_001`, persisted in both
+complaint and request tables, one mirror, created 18:54:47.540 WAT on 2026-10-24.
+This disproves the supplied later reply's denial that the complaint was saved.
+No simulator was invoked or mutation performed for this follow-up. Actual Chord
+revision/context delivery remains unverified. Details are in the incident note.

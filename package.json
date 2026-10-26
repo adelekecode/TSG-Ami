@@ -17,8 +17,10 @@
     "db:migrate:remote": "wrangler d1 migrations apply ami-db --remote",
     "db:seed:local": "npm run db:seed:demo",
     "lint": "tsc --noEmit --noUnusedLocals --noUnusedParameters",
-    "db:seed:demo": "npm run db:seed:concierge && wrangler d1 execute ami-db --local --file seed-demo.sql",
-    "db:seed:demo:remote": "npm run db:migrate:remote && wrangler d1 execute ami-db --remote --file seed.sql && wrangler d1 execute ami-db --remote --file seed-concierge.sql && wrangler d1 execute ami-db --remote --file seed-demo.sql"
+    "db:seed:demo": "npm run db:seed:concierge && wrangler d1 execute ami-db --local --file seed-demo.sql && npm run db:seed:bills",
+    "db:seed:demo:remote": "npm run db:migrate:remote && wrangler d1 execute ami-db --remote --file seed.sql && wrangler d1 execute ami-db --remote --file seed-concierge.sql && wrangler d1 execute ami-db --remote --file seed-demo.sql && npm run db:seed:bills:remote",
+    "db:seed:bills": "wrangler d1 execute ami-db --local --file seed-bills.sql",
+    "db:seed:bills:remote": "wrangler d1 execute ami-db --remote --file seed-bills.sql"
   },
   "keywords": [],
   "author": "",
